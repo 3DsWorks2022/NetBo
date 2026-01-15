@@ -1,0 +1,25 @@
+[Unit]
+Description=RTSP to HLS Web Service (转流+Web服务器)
+Documentation=https://github.com/your-repo/rtsp-stream
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 注意：部署时会自动替换为实际路径
+User=%USER%
+WorkingDirectory=%WORKDIR%
+ExecStart=%WORKDIR%/start_web.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:%WORKDIR%/logs/web_service.log
+StandardError=append:%WORKDIR%/logs/web_service.log
+
+# 环境变量
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 资源限制（可选）
+# LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
