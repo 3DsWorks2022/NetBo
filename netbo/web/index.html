@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTSP直播播放器</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .player-container {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            margin-bottom: 20px;
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            padding-bottom: 56.25%; /* 16:9 比例 */
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .status {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.9em;
+        }
+
+        .status.connecting {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .status.playing {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c82333;
+        }
+
+        .info {
+            margin-top: 15px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            font-size: 0.9em;
+            color: #495057;
+        }
+
+        .info code {
+            background: #e9ecef;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .player-container {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📹 RTSP直播播放器</h1>
+            <p>实时视频流播放</p>
+        </div>
+
+        <div class="player-container">
+            <div class="video-wrapper">
+                <video id="video" controls loop="false"></video>
+            </div>
+
+            <div id="status" class="status connecting">
+                ⏳ 正在连接...
+            </div>
+
+            <div class="controls">
+                <button class="btn-primary" onclick="playStream()">▶️ 播放</button>
+                <button class="btn-secondary" onclick="pauseStream()">⏸️ 暂停</button>
+                <button class="btn-danger" onclick="stopStream()">⏹️ 停止</button>
+                <button class="btn-secondary" onclick="reloadStream()">🔄 重新加载</button>
+            </div>
+
+            <div class="info">
+                <strong>流地址:</strong> <code id="streamUrlDisplay">自动检测</code><br>
+                <strong>播放器:</strong> HLS.js (支持低延迟模式)<br>
+                <strong>缓冲时长:</strong> <span id="bufferInfo">计算中...</span>秒
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let video = document.getElementById('video');
+        let hls = null;
+        
+        // 自动检测环境并设置正确的流地址
+        // 统一使用绝对路径 /hls/stream.m3u8，因为Python服务器已经支持这个路径
+        function getStreamUrl() {
+            // 优先使用URL参数指定的流地址
+            const urlParams = new URLSearchParams(window.location.search);
+            const customUrl = urlParams.get('stream');
+            if (customUrl) {
+                return customUrl;
+            }
+            
+            // 统一使用绝对路径 /hls/stream.m3u8
+            // Python HTTP服务器和Nginx都支持这个路径
+            return './hls/stream.m3u8';
+        }
+        
+        let streamUrl = getStreamUrl();
+        let retryCount = 0; // 重试计数器
+        let maxRetries = 3; // 最大重试次数
+        let isRetrying = false; // 是否正在重试
+        
+        // 从URL参数获取缓存配置，或使用默认值
+        function getConfigValue(paramName, defaultValue) {
+            const urlParams = new URLSearchParams(window.location.search);
+            const value = urlParams.get(paramName);
+            return value ? parseInt(value) : defaultValue;
+        }
+        
+        // 获取缓存配置（优先使用URL参数，否则使用默认值）
+        // 默认值需要与config/stream.conf中的PLAYER_MAX_BUFFER_LENGTH和PLAYER_LIVE_SYNC_COUNT保持一致
+        const maxBufferLength = getConfigValue('buffer', 30);
+        const liveSyncCount = getConfigValue('sync', 3);
+
+        // 更新状态显示
+        function updateStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = 'status ' + type;
+        }
+        
+        // 更新缓冲信息显示
+        function updateBufferInfo() {
+            const bufferInfoEl = document.getElementById('bufferInfo');
+            if (bufferInfoEl) {
+                bufferInfoEl.textContent = maxBufferLength + '秒 (同步' + liveSyncCount + '个切片)';
+            }
+        }
+
+        // 初始化HLS播放器
+        function initPlayer() {
+            // 更新显示的流地址
+            const streamUrlDisplay = document.getElementById('streamUrlDisplay');
+            if (streamUrlDisplay) {
+                streamUrlDisplay.textContent = streamUrl;
+            }
+            
+            // 检查HLS.js是否加载
+            if (typeof Hls === 'undefined') {
+                updateStatus('❌ HLS.js库未加载，请检查网络连接', 'error');
+                console.error('HLS.js未加载');
+                return;
+            }
+            
+            if (Hls.isSupported()) {
+                console.log('初始化HLS播放器，流地址:', streamUrl);
+                console.log('当前环境:', {
+                    hostname: window.location.hostname,
+                    port: window.location.port,
+                    pathname: window.location.pathname,
+                    protocol: window.location.protocol
+                });
+                
+                hls = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true, // 低延迟模式
+                    backBufferLength: 90,
+                    maxBufferLength: maxBufferLength, // 使用配置值
+                    maxMaxBufferLength: maxBufferLength * 2,
+                    maxBufferSize: maxBufferLength * 2 * 1000 * 1000,
+                    maxBufferHole: 0.5,
+                    highBufferWatchdogPeriod: 2,
+                    nudgeOffset: 0.1,
+                    nudgeMaxRetry: 5, // 增加重试次数
+                    maxFragLoadingTimeOut: 10, // 增加超时时间
+                    fragLoadingTimeOut: 5, // 增加片段加载超时
+                    manifestLoadingTimeOut: 5, // 增加清单加载超时
+                    liveSyncDurationCount: liveSyncCount, // 使用配置值
+                    liveMaxLatencyDurationCount: liveSyncCount + 2, // 最大延迟持续时间
+                    xhrSetup: function(xhr, url) {
+                        // 添加CORS支持
+                        xhr.withCredentials = false;
+                    }
+                });
+
+                // 先测试文件是否存在
+                fetch(streamUrl, { method: 'HEAD' })
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                        }
+                        console.log('✓ HLS文件可访问:', streamUrl);
+                        hls.loadSource(streamUrl);
+                        hls.attachMedia(video);
+                    })
+                    .catch(error => {
+                        console.error('无法访问HLS文件:', error);
+                        updateStatus('❌ 无法访问流文件: ' + streamUrl + ' (错误: ' + error.message + ')', 'error');
+                    });
+
+                // 事件监听
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    updateStatus('✅ 流已加载，可以播放', 'playing');
+                    // 重置重试计数（成功加载后）
+                    retryCount = 0;
+                    isRetrying = false;
+                    // 更新缓冲信息显示
+                    updateBufferInfo();
+                    video.play().catch(e => {
+                        console.log('自动播放被阻止:', e);
+                        updateStatus('⚠️ 点击播放按钮开始播放', 'connecting');
+                    });
+                });
+
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    // 显示详细的错误信息
+                    let errorMsg = 'HLS错误: ';
+                    if (data.type) {
+                        errorMsg += '类型=' + data.type + ', ';
+                    }
+                    if (data.details) {
+                        errorMsg += '详情=' + data.details + ', ';
+                    }
+                    if (data.fatal !== undefined) {
+                        errorMsg += '致命=' + data.fatal + ', ';
+                    }
+                    if (data.url) {
+                        errorMsg += 'URL=' + data.url + ', ';
+                    }
+                    if (data.response) {
+                        errorMsg += '响应=' + JSON.stringify(data.response) + ', ';
+                    }
+                    if (data.code) {
+                        errorMsg += '代码=' + data.code + ', ';
+                    }
+                    console.error(errorMsg, data);
+                    
+                    // 在页面上显示错误信息（用于调试）
+                    if (data.fatal) {
+                        let userMsg = '❌ HLS错误: ';
+                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                            userMsg += '网络错误';
+                            if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR) {
+                                userMsg += ' (无法加载播放列表，请检查路径: ' + streamUrl + ')';
+                            } else if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT) {
+                                userMsg += ' (加载超时)';
+                            } else if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
+                                userMsg += ' (无法加载视频片段)';
+                            } else if (data.details) {
+                                userMsg += ' (' + data.details + ')';
+                            }
+                        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                            userMsg += '媒体错误';
+                            if (data.details) {
+                                userMsg += ' (' + data.details + ')';
+                            }
+                        } else if (data.type === Hls.ErrorTypes.MUX_ERROR) {
+                            userMsg += '格式错误';
+                        } else {
+                            userMsg += (data.type || '未知错误');
+                            if (data.details) {
+                                userMsg += ' (' + data.details + ')';
+                            }
+                        }
+                        // 在控制台显示完整错误对象
+                        console.error('用户可见错误:', userMsg);
+                        console.error('完整错误对象:', JSON.stringify(data, null, 2));
+                        // 暂时显示错误信息（在重试前）
+                        if (!isRetrying) {
+                            updateStatus(userMsg, 'error');
+                        }
+                    } else {
+                        // 非致命错误，只记录日志
+                        console.warn('HLS非致命错误:', data);
+                    }
+                    
+                    if (data.fatal) {
+                        // 检查重试次数
+                        if (retryCount >= maxRetries) {
+                            updateStatus('❌ 重试次数过多，请手动刷新页面', 'error');
+                            return;
+                        }
+                        
+                        if (isRetrying) {
+                            return; // 如果正在重试，不再处理
+                        }
+                        
+                        isRetrying = true;
+                        retryCount++;
+                        
+                        switch(data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                updateStatus('❌ 网络错误，尝试重新加载 (' + retryCount + '/' + maxRetries + ')...', 'error');
+                                // 延迟后重试，避免频繁重试
+                                setTimeout(function() {
+                                    try {
+                                        hls.startLoad();
+                                        isRetrying = false;
+                                    } catch(e) {
+                                        console.error('重试失败:', e);
+                                        isRetrying = false;
+                                        if (retryCount < maxRetries) {
+                                            reloadStream();
+                                        }
+                                    }
+                                }, 2000);
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                updateStatus('❌ 媒体错误，尝试恢复 (' + retryCount + '/' + maxRetries + ')...', 'error');
+                                // 尝试恢复媒体错误
+                                try {
+                                    hls.recoverMediaError();
+                                    isRetrying = false;
+                                } catch(e) {
+                                    console.error('恢复失败:', e);
+                                    isRetrying = false;
+                                    if (retryCount < maxRetries) {
+                                        setTimeout(function() {
+                                            reloadStream();
+                                        }, 2000);
+                                    }
+                                }
+                                break;
+                            default:
+                                updateStatus('❌ 致命错误，3秒后自动重新加载 (' + retryCount + '/' + maxRetries + ')', 'error');
+                                // 致命错误，延迟后重新加载
+                                setTimeout(function() {
+                                    isRetrying = false;
+                                    if (retryCount < maxRetries) {
+                                        reloadStream();
+                                    }
+                                }, 3000);
+                                break;
+                        }
+                    } else {
+                        // 非致命错误，只记录日志，不重试
+                        console.warn('HLS警告:', data);
+                    }
+                });
+
+                hls.on(Hls.Events.FRAG_LOADED, function() {
+                    updateStatus('✅ 正在播放', 'playing');
+                });
+
+                // 监听缓冲状态
+                hls.on(Hls.Events.BUFFER_APPENDING, function() {
+                    // 缓冲区正在追加数据
+                });
+
+                hls.on(Hls.Events.BUFFER_APPENDED, function() {
+                    // 缓冲区追加完成
+                });
+
+                // 监听播放状态
+                hls.on(Hls.Events.PLAYING, function() {
+                    updateStatus('✅ 正在播放', 'playing');
+                });
+
+                // 监听等待数据状态
+                hls.on(Hls.Events.WAITING, function() {
+                    updateStatus('⏳ 缓冲中...', 'connecting');
+                });
+
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                // 原生HLS支持（Safari）
+                video.src = streamUrl;
+                video.addEventListener('loadedmetadata', function() {
+                    updateStatus('✅ 流已加载（原生HLS）', 'playing');
+                });
+                video.addEventListener('error', function() {
+                    updateStatus('❌ 播放错误', 'error');
+                });
+            } else {
+                updateStatus('❌ 浏览器不支持HLS播放', 'error');
+            }
+        }
+
+        // 播放
+        function playStream() {
+            if (video.paused) {
+                // 如果HLS未初始化，先初始化
+                if (!hls && Hls.isSupported()) {
+                    initPlayer();
+                    return;
+                }
+                video.play().then(() => {
+                    updateStatus('✅ 正在播放', 'playing');
+                    retryCount = 0; // 播放成功，重置重试计数
+                }).catch(e => {
+                    console.error('播放失败:', e);
+                    updateStatus('❌ 播放失败: ' + e.message, 'error');
+                    // 播放失败时不自动重试，让用户手动操作
+                });
+            }
+        }
+
+        // 暂停
+        function pauseStream() {
+            video.pause();
+            updateStatus('⏸️ 已暂停', 'connecting');
+        }
+
+        // 停止
+        function stopStream() {
+            video.pause();
+            video.currentTime = 0;
+            if (hls) {
+                hls.stopLoad();
+            }
+            updateStatus('⏹️ 已停止', 'connecting');
+        }
+
+        // 重新加载
+        function reloadStream() {
+            if (isRetrying) {
+                return; // 如果正在重试，不重复执行
+            }
+            isRetrying = true;
+            updateStatus('🔄 正在重新加载...', 'connecting');
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            video.src = '';
+            video.pause();
+            setTimeout(() => {
+                isRetrying = false;
+                initPlayer();
+            }, 1000);
+        }
+
+        // 页面加载时初始化
+        window.addEventListener('DOMContentLoaded', function() {
+            // 初始化时更新缓冲信息
+            updateBufferInfo();
+            initPlayer();
+        });
+
+        // 定期检查播放状态，防止卡死（但避免循环）
+        let lastCheckTime = Date.now();
+        setInterval(function() {
+            // 如果正在重试，不执行检查
+            if (isRetrying) {
+                return;
+            }
+            
+            if (hls && !video.paused) {
+                // 如果视频在播放但缓冲为空，尝试恢复
+                if (video.readyState < 2 && video.networkState === 3) {
+                    // 限制检查频率，避免频繁触发
+                    let now = Date.now();
+                    if (now - lastCheckTime > 10000) { // 至少间隔10秒
+                        console.warn('检测到播放卡顿，尝试恢复...');
+                        updateStatus('⚠️ 检测到卡顿，正在恢复...', 'connecting');
+                        try {
+                            hls.startLoad();
+                            lastCheckTime = now;
+                        } catch(e) {
+                            console.error('恢复失败:', e);
+                        }
+                    }
+                }
+            }
+        }, 5000); // 每5秒检查一次
+
+        // 页面可见性变化时处理
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                // 页面隐藏时暂停
+                if (!video.paused) {
+                    video.pause();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
