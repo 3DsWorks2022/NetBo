@@ -1,22 +1,32 @@
 [Unit]
 Description=RTSP to HLS Web Service (转流+Web服务器)
 Documentation=https://github.com/your-repo/rtsp-stream
-After=network.target
+After=network.target network-online.target
 Wants=network-online.target
+Requires=network.target
 
 [Service]
 Type=simple
 # 注意：部署时会自动替换为实际路径
 User=%USER%
+Group=%USER%
 WorkingDirectory=%WORKDIR%
-ExecStart=%WORKDIR%/start_web.sh
+# 使用符号链接启动脚本（更可靠）
+ExecStart=/usr/local/bin/rtsp-start-web
+# 停止服务时发送 SIGTERM
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
 Restart=always
 RestartSec=10
+# 确保日志目录存在
 StandardOutput=append:%WORKDIR%/logs/web_service.log
 StandardError=append:%WORKDIR%/logs/web_service.log
 
 # 环境变量
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# 设置工作环境
+Environment="HOME=%WORKDIR%"
 
 # 资源限制（可选）
 # LimitNOFILE=65536

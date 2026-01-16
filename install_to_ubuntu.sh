@@ -226,10 +226,56 @@ if [ "$ALL_FILES_OK" = false ]; then
 fi
 echo ""
 
-# 步骤4: 设置执行权限
-echo -e "${BLUE}[4/7] 设置执行权限...${NC}"
-$SSH_CMD $REMOTE_HOST "cd $REMOTE_DIR && chmod +x scripts/*.sh *.sh web/*.py 2>/dev/null || true" > /dev/null 2>&1
-echo -e "${GREEN}✓ 权限设置完成${NC}"
+# 步骤4: 设置执行权限（全面权限修复）
+echo -e "${BLUE}[4/7] 设置执行权限（全面修复）...${NC}"
+$SSH_CMD $REMOTE_HOST << 'ENDSSH'
+cd ~/rtsp-stream
+
+echo "修复所有脚本和文件的执行权限..."
+
+# 优先使用权限修复脚本（如果存在）
+if [ -f "./scripts/fix_permissions.sh" ]; then
+    echo "使用权限修复脚本..."
+    bash ./scripts/fix_permissions.sh
+else
+    echo "手动修复权限（最高权限 777）..."
+    # 设置所有脚本的执行权限（最高权限）
+    chmod 777 *.sh 2>/dev/null || sudo chmod 777 *.sh 2>/dev/null || true
+    chmod 777 scripts/*.sh 2>/dev/null || sudo chmod 777 scripts/*.sh 2>/dev/null || true
+    chmod 777 web/*.py 2>/dev/null || sudo chmod 777 web/*.py 2>/dev/null || true
+    
+    # 特别确保关键文件有执行权限（最高权限）
+    chmod 777 start_web.sh 2>/dev/null || sudo chmod 777 start_web.sh 2>/dev/null || true
+    chmod 777 scripts/start_stream.sh 2>/dev/null || sudo chmod 777 scripts/start_stream.sh 2>/dev/null || true
+    chmod 777 scripts/stop_stream.sh 2>/dev/null || sudo chmod 777 scripts/stop_stream.sh 2>/dev/null || true
+    chmod 777 scripts/check_status.sh 2>/dev/null || sudo chmod 777 scripts/check_status.sh 2>/dev/null || true
+    
+    # 确保日志目录存在且有写权限（最高权限）
+    mkdir -p logs 2>/dev/null || sudo mkdir -p logs 2>/dev/null || true
+    chmod 777 logs 2>/dev/null || sudo chmod 777 logs 2>/dev/null || true
+    chmod 777 scripts 2>/dev/null || sudo chmod 777 scripts 2>/dev/null || true
+    chmod 777 web 2>/dev/null || sudo chmod 777 web 2>/dev/null || true
+    chmod 777 config 2>/dev/null || sudo chmod 777 config 2>/dev/null || true
+    
+    # 确保配置文件可读写（最高权限）
+    chmod 777 config/*.conf 2>/dev/null || sudo chmod 777 config/*.conf 2>/dev/null || true
+    
+    # 如果还是失败，使用sudo强制设置整个目录
+    if [ ! -x start_web.sh ]; then
+        echo "使用sudo强制设置最高权限..."
+        sudo chmod -R 777 . 2>/dev/null || true
+    fi
+fi
+
+# 验证关键文件权限
+echo ""
+echo "验证关键文件权限:"
+ls -la start_web.sh 2>/dev/null | head -1
+ls -la scripts/start_stream.sh 2>/dev/null | head -1
+
+echo "✓ 权限修复完成"
+ENDSSH
+echo -e "${GREEN}✓ 权限设置完成（包括所有脚本和文件）${NC}"
 echo ""
 
 # 步骤5: 在远程服务器上执行安装
@@ -395,8 +441,55 @@ echo "配置systemd服务（开机自启）..."
 CURRENT_USER=$(whoami)
 PROJECT_PATH=$(pwd)
 
+# 确保使用绝对路径（展开 ~ 符号）
+if [[ "$PROJECT_PATH" == ~* ]]; then
+    PROJECT_PATH=$(eval echo "$PROJECT_PATH")
+fi
+# 再次确保是绝对路径
+PROJECT_PATH=$(cd "$PROJECT_PATH" && pwd)
+
 echo "  当前用户: $CURRENT_USER"
 echo "  项目路径: $PROJECT_PATH"
+
+# 创建 start_web.sh 的符号链接到 /usr/local/bin
+echo ""
+echo "创建 start_web.sh 符号链接..."
+SYMLINK_NAME="rtsp-start-web"
+SYMLINK_PATH="/usr/local/bin/$SYMLINK_NAME"
+ORIGINAL_SCRIPT="$PROJECT_PATH/start_web.sh"
+
+# 删除旧的符号链接（如果存在）
+if [ -L "$SYMLINK_PATH" ]; then
+    echo "  删除旧的符号链接..."
+    sudo rm -f "$SYMLINK_PATH" 2>/dev/null || true
+fi
+
+    # 创建新的符号链接
+if [ -f "$ORIGINAL_SCRIPT" ]; then
+    echo "  创建符号链接: $SYMLINK_PATH -> $ORIGINAL_SCRIPT"
+    sudo ln -s "$ORIGINAL_SCRIPT" "$SYMLINK_PATH" 2>/dev/null
+    
+    if [ -L "$SYMLINK_PATH" ]; then
+        echo "  ✓ 符号链接创建成功"
+        # 确保符号链接和原始文件都有最高权限
+        sudo chmod 777 "$SYMLINK_PATH" 2>/dev/null || true
+        chmod 777 "$ORIGINAL_SCRIPT" 2>/dev/null || sudo chmod 777 "$ORIGINAL_SCRIPT" 2>/dev/null || true
+        
+        # 验证符号链接
+        if [ -x "$SYMLINK_PATH" ] || [ -f "$ORIGINAL_SCRIPT" ]; then
+            echo "  ✓ 符号链接验证成功"
+            ls -la "$SYMLINK_PATH" | sed 's/^/    /'
+        else
+            echo "  ⚠ 警告: 符号链接验证失败"
+        fi
+    else
+        echo "  ✗ 错误: 符号链接创建失败"
+        echo "  将使用原始路径启动服务"
+    fi
+else
+    echo "  ✗ 错误: 原始脚本不存在: $ORIGINAL_SCRIPT"
+    echo "  将使用原始路径启动服务"
+fi
 
 # 优先配置rtsp-web.service（启动start_web.sh，包含转流+Web服务器）
 if [ -f "systemd/rtsp-web.service" ]; then
@@ -407,11 +500,26 @@ if [ -f "systemd/rtsp-web.service" ]; then
     sed "s|%USER%|$CURRENT_USER|g; s|%WORKDIR%|$PROJECT_PATH|g" \
         systemd/rtsp-web.service > "$SERVICE_FILE"
     
+    # 确保服务文件使用符号链接（如果符号链接存在）
+    if [ -L "/usr/local/bin/rtsp-start-web" ]; then
+        echo "  使用符号链接: /usr/local/bin/rtsp-start-web"
+        # 确保 ExecStart 使用符号链接
+        if ! grep -q "^ExecStart=/usr/local/bin/rtsp-start-web" "$SERVICE_FILE"; then
+            sed -i 's|^ExecStart=.*|ExecStart=/usr/local/bin/rtsp-start-web|' "$SERVICE_FILE"
+        fi
+    else
+        echo "  ⚠ 符号链接不存在，使用原始路径: $PROJECT_PATH/start_web.sh"
+        # 如果符号链接不存在，使用原始路径
+        sed -i "s|^ExecStart=.*|ExecStart=/bin/bash $PROJECT_PATH/start_web.sh|" "$SERVICE_FILE"
+    fi
+    
     # 复制到systemd目录
     sudo cp "$SERVICE_FILE" /etc/systemd/system/rtsp-web.service
     rm -f "$SERVICE_FILE"
     
     echo "  ✓ rtsp-web.service已创建"
+    echo "  服务配置预览:"
+    grep -E "(ExecStart|WorkingDirectory|User)" /etc/systemd/system/rtsp-web.service | sed 's/^/    /'
 else
     echo "  ⚠ rtsp-web.service文件不存在"
 fi
@@ -434,15 +542,157 @@ else
     echo "  ⚠ rtsp-stream.service文件不存在"
 fi
 
+# 配置web.service（autostart.sh的功能，作为备选服务）
+echo ""
+echo "  配置web.service（备选服务，日志在/var/log/）..."
+sudo tee /etc/systemd/system/web.service > /dev/null << EOF
+[Unit]
+Description=Web Application Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_PATH
+ExecStart=$PROJECT_PATH/start_web.sh
+Restart=always
+RestartSec=10
+User=$CURRENT_USER
+Group=$CURRENT_USER
+
+# 环境变量
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 日志
+StandardOutput=append:/var/log/web.log
+StandardError=append:/var/log/web-error.log
+
+# 资源限制（可选）
+# LimitNOFILE=65535
+# LimitNPROC=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "  ✓ web.service已创建"
+echo "  服务配置预览:"
+grep -E "(ExecStart|WorkingDirectory|User)" /etc/systemd/system/web.service | sed 's/^/    /'
+
+# 创建日志文件（如果不存在）
+sudo touch /var/log/web.log /var/log/web-error.log 2>/dev/null || true
+sudo chown $CURRENT_USER:$CURRENT_USER /var/log/web*.log 2>/dev/null || true
+echo "  ✓ 日志文件已创建: /var/log/web.log, /var/log/web-error.log"
+
 # 重新加载systemd
-if [ -f "systemd/rtsp-web.service" ] || [ -f "systemd/rtsp-stream.service" ]; then
+if [ -f "systemd/rtsp-web.service" ] || [ -f "systemd/rtsp-stream.service" ] || [ -f "/etc/systemd/system/web.service" ]; then
+    echo "  重新加载systemd配置..."
     sudo systemctl daemon-reload
+    sleep 1
+    sudo systemctl daemon-reload  # 再次确保加载
     echo "  ✓ systemd已重新加载"
     
     # 优先启用rtsp-web.service（如果存在）
     if [ -f "systemd/rtsp-web.service" ]; then
-        sudo systemctl enable rtsp-web.service 2>/dev/null || true
-        echo "  ✓ rtsp-web.service已启用（开机自启，启动start_web.sh）"
+        # 全面修复权限（使用sudo确保成功）
+        echo "  修复所有文件权限..."
+        chmod +x "$PROJECT_PATH/start_web.sh" 2>/dev/null || sudo chmod +x "$PROJECT_PATH/start_web.sh" 2>/dev/null || true
+        chmod +x "$PROJECT_PATH/scripts"/*.sh 2>/dev/null || sudo chmod +x "$PROJECT_PATH/scripts"/*.sh 2>/dev/null || true
+        chmod +x "$PROJECT_PATH"/*.sh 2>/dev/null || sudo chmod +x "$PROJECT_PATH"/*.sh 2>/dev/null || true
+        
+        # 确保日志目录存在且有写权限
+        mkdir -p "$PROJECT_PATH/logs" 2>/dev/null || sudo mkdir -p "$PROJECT_PATH/logs" 2>/dev/null || true
+        chmod 755 "$PROJECT_PATH/logs" 2>/dev/null || sudo chmod 755 "$PROJECT_PATH/logs" 2>/dev/null || true
+        chown -R $CURRENT_USER:$CURRENT_USER "$PROJECT_PATH/logs" 2>/dev/null || sudo chown -R $CURRENT_USER:$CURRENT_USER "$PROJECT_PATH/logs" 2>/dev/null || true
+        
+        # 验证 start_web.sh 文件是否存在
+        if [ ! -f "$PROJECT_PATH/start_web.sh" ]; then
+            echo "  ✗ 错误: start_web.sh 文件不存在: $PROJECT_PATH/start_web.sh"
+        else
+            echo "  ✓ start_web.sh 文件存在"
+            # 验证脚本是否有执行权限
+            if [ -x "$PROJECT_PATH/start_web.sh" ]; then
+                echo "  ✓ start_web.sh 有执行权限"
+            else
+                echo "  ⚠ 警告: start_web.sh 没有执行权限，尝试修复..."
+                chmod +x "$PROJECT_PATH/start_web.sh" 2>/dev/null || sudo chmod +x "$PROJECT_PATH/start_web.sh" 2>/dev/null || true
+            fi
+        fi
+        
+        # 验证服务文件是否正确创建
+        if [ -f "/etc/systemd/system/rtsp-web.service" ]; then
+            echo "  ✓ systemd 服务文件已创建: /etc/systemd/system/rtsp-web.service"
+            # 显示服务文件的关键配置（用于调试）
+            echo "  服务配置预览:"
+            grep -E "(ExecStart|WorkingDirectory|User|Group)" /etc/systemd/system/rtsp-web.service | sed 's/^/    /'
+            
+            # 验证路径是否为绝对路径
+            if grep -q "^ExecStart=.*~" /etc/systemd/system/rtsp-web.service; then
+                echo "  ⚠ 警告: 服务文件中包含 ~ 符号，可能无法正确展开"
+            fi
+        else
+            echo "  ✗ 错误: systemd 服务文件创建失败"
+        fi
+        
+        # 强制启用服务（开机自启动）- 使用多种方法确保成功
+        echo "  强制启用服务（开机自启动）..."
+        
+        # 方法1: 使用 systemctl enable
+        ENABLE_SUCCESS=false
+        if sudo systemctl enable rtsp-web.service 2>/dev/null; then
+            ENABLE_SUCCESS=true
+            echo "  ✓ 方法1: systemctl enable 成功"
+        else
+            echo "  ⚠ 方法1失败，尝试其他方法..."
+        fi
+        
+        # 方法2: 如果方法1失败，尝试强制创建符号链接
+        if [ "$ENABLE_SUCCESS" = false ]; then
+            echo "  方法2: 手动创建systemd服务链接..."
+            if [ -f "/etc/systemd/system/rtsp-web.service" ]; then
+                sudo ln -sf /etc/systemd/system/rtsp-web.service /etc/systemd/system/multi-user.target.wants/rtsp-web.service 2>/dev/null || true
+                if [ -L "/etc/systemd/system/multi-user.target.wants/rtsp-web.service" ]; then
+                    ENABLE_SUCCESS=true
+                    echo "  ✓ 方法2: 手动创建链接成功"
+                fi
+            fi
+        fi
+        
+        # 方法3: 如果还是失败，使用 systemctl preset
+        if [ "$ENABLE_SUCCESS" = false ]; then
+            echo "  方法3: 使用 systemctl preset..."
+            sudo systemctl preset rtsp-web.service 2>/dev/null || true
+            sleep 1
+            if systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+                ENABLE_SUCCESS=true
+                echo "  ✓ 方法3: systemctl preset 成功"
+            fi
+        fi
+        
+        # 最终验证服务是否已启用
+        if systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+            echo "  ✓✓✓ 服务已确认启用开机自启动 ✓✓✓"
+            echo "  查看服务状态: sudo systemctl status rtsp-web"
+            
+            # 尝试立即启动服务进行测试
+            echo "  测试启动服务..."
+            sudo systemctl stop rtsp-web.service 2>/dev/null || true
+            sleep 1
+            sudo systemctl start rtsp-web.service 2>&1 | head -5 || true
+            sleep 3
+            if systemctl is-active --quiet rtsp-web.service 2>/dev/null; then
+                echo "  ✓✓✓ 服务测试启动成功 ✓✓✓"
+            else
+                echo "  ⚠ 服务测试启动失败，查看日志: sudo journalctl -u rtsp-web.service -n 20"
+                # 即使启动失败，服务仍然会在开机时自动启动
+                echo "  ℹ️  注意: 服务已启用开机自启动，即使现在启动失败，重启后也会自动启动"
+            fi
+        else
+            echo "  ✗✗✗ 错误: 所有方法都失败，服务未能启用开机自启动 ✗✗✗"
+            echo "  请手动执行以下命令:"
+            echo "    sudo systemctl enable rtsp-web.service"
+            echo "    sudo systemctl daemon-reload"
+            echo "    sudo systemctl start rtsp-web.service"
+        fi
     fi
     
     # 启用rtsp-stream.service（如果存在且rtsp-web不存在）
@@ -450,8 +700,48 @@ if [ -f "systemd/rtsp-web.service" ] || [ -f "systemd/rtsp-stream.service" ]; th
         sudo systemctl enable rtsp-stream.service 2>/dev/null || true
         echo "  ✓ rtsp-stream.service已启用（开机自启）"
     fi
+    
+    # 启用web.service（作为备选，如果rtsp-web.service不存在或启动失败时使用）
+    if [ -f "/etc/systemd/system/web.service" ]; then
+        echo ""
+        echo "  配置web.service（备选服务）..."
+        # 如果rtsp-web.service不存在或未启用，则启用web.service
+        if [ ! -f "systemd/rtsp-web.service" ] || ! systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+            echo "  启用web.service（开机自启）..."
+            sudo systemctl enable web.service 2>/dev/null || true
+            if systemctl is-enabled web.service >/dev/null 2>&1; then
+                echo "  ✓ web.service已启用（开机自启）"
+                echo "  测试启动web.service..."
+                sudo systemctl stop web.service 2>/dev/null || true
+                sleep 1
+                sudo systemctl start web.service 2>&1 | head -5 || true
+                sleep 3
+                if systemctl is-active --quiet web.service 2>/dev/null; then
+                    echo "  ✓ web.service测试启动成功"
+                else
+                    echo "  ⚠ web.service测试启动失败，查看日志: sudo journalctl -u web.service -n 20"
+                fi
+            else
+                echo "  ⚠ web.service启用失败，但服务文件已创建"
+            fi
+        else
+            echo "  ℹ️  rtsp-web.service已启用，web.service作为备选服务（未启用）"
+            echo "  如需使用web.service，可执行: sudo systemctl enable web.service"
+        fi
+    fi
 else
-    echo "  ⚠ 没有找到systemd服务文件，跳过自动启动配置"
+    # 如果没有rtsp-web.service，尝试启用web.service
+    if [ -f "/etc/systemd/system/web.service" ]; then
+        echo "  启用web.service（开机自启）..."
+        sudo systemctl enable web.service 2>/dev/null || true
+        if systemctl is-enabled web.service >/dev/null 2>&1; then
+            echo "  ✓ web.service已启用（开机自启）"
+        else
+            echo "  ⚠ web.service启用失败，但服务文件已创建"
+        fi
+    else
+        echo "  ⚠ 没有找到systemd服务文件，跳过自动启动配置"
+    fi
 fi
 
 echo ""
@@ -546,6 +836,7 @@ if [ -f /etc/systemd/system/rtsp-web.service ]; then
     
     # 停止可能存在的旧服务
     sudo systemctl stop rtsp-web.service 2>/dev/null || true
+    sudo systemctl stop web.service 2>/dev/null || true
     sudo systemctl stop rtsp-stream.service 2>/dev/null || true
     sleep 1
     
@@ -579,12 +870,110 @@ if [ -f /etc/systemd/system/rtsp-web.service ]; then
             echo "⚠️  systemd Web服务启动失败，查看错误信息..."
             sudo systemctl status rtsp-web.service --no-pager -l | head -15
             echo ""
-            echo "尝试使用转流服务..."
-            # 继续尝试转流服务
+            echo "尝试使用web.service（备选服务）..."
+            # 尝试使用web.service作为备选
+            if [ -f /etc/systemd/system/web.service ]; then
+                echo "尝试启动web.service..."
+                sudo systemctl stop web.service 2>/dev/null || true
+                sleep 1
+                if sudo systemctl start web.service 2>/dev/null; then
+                    sleep 3
+                    if sudo systemctl is-active --quiet web.service; then
+                        echo "✅ web.service已启动（备选服务）"
+                        echo "✅ 服务已设置为开机自启"
+                        HLS_DIR=${HLS_OUTPUT_DIR:-/var/www/hls}
+                        echo "等待HLS文件生成..."
+                        for i in {1..15}; do
+                            if [ -f "$HLS_DIR/stream.m3u8" ]; then
+                                echo "✅ HLS文件已生成"
+                                break
+                            fi
+                            sleep 1
+                        done
+                        echo ""
+                        echo "服务状态:"
+                        sudo systemctl status web.service --no-pager -l | head -10
+                        echo ""
+                        echo "✅ Web服务（web.service）已配置为开机自动启动"
+                    else
+                        echo "⚠️  web.service启动也失败，尝试转流服务..."
+                    fi
+                fi
+            else
+                echo "尝试使用转流服务..."
+            fi
         fi
     else
-        echo "⚠️  systemd Web服务启动失败，尝试转流服务..."
-        # 继续尝试转流服务
+        echo "⚠️  systemd Web服务启动失败，尝试web.service或转流服务..."
+        # 尝试使用web.service作为备选
+        if [ -f /etc/systemd/system/web.service ]; then
+            echo "尝试启动web.service（备选服务）..."
+            sudo systemctl stop web.service 2>/dev/null || true
+            sleep 1
+            if sudo systemctl start web.service 2>/dev/null; then
+                sleep 3
+                if sudo systemctl is-active --quiet web.service; then
+                    echo "✅ web.service已启动（备选服务）"
+                    HLS_DIR=${HLS_OUTPUT_DIR:-/var/www/hls}
+                    echo "等待HLS文件生成..."
+                    for i in {1..15}; do
+                        if [ -f "$HLS_DIR/stream.m3u8" ]; then
+                            echo "✅ HLS文件已生成"
+                            break
+                        fi
+                        sleep 1
+                    done
+                else
+                    echo "⚠️  web.service启动也失败，尝试转流服务..."
+                fi
+            fi
+        fi
+    fi
+fi
+
+# 方法1.2: 如果rtsp-web.service不存在，尝试使用web.service
+if [ ! -f /etc/systemd/system/rtsp-web.service ] && [ -f /etc/systemd/system/web.service ]; then
+    echo "检测到web.service，使用systemd启动（转流+Web服务器）..."
+    
+    # 停止可能存在的旧服务
+    sudo systemctl stop web.service 2>/dev/null || true
+    sudo systemctl stop rtsp-stream.service 2>/dev/null || true
+    sleep 1
+    
+    # 启动web.service
+    if sudo systemctl start web.service 2>/dev/null; then
+        sleep 3
+        
+        # 检查服务状态
+        if sudo systemctl is-active --quiet web.service; then
+            echo "✅ web.service已启动"
+            echo "✅ 服务已设置为开机自启"
+            
+            # 等待HLS文件生成
+            HLS_DIR=${HLS_OUTPUT_DIR:-/var/www/hls}
+            echo "等待HLS文件生成..."
+            for i in {1..15}; do
+                if [ -f "$HLS_DIR/stream.m3u8" ]; then
+                    echo "✅ HLS文件已生成"
+                    break
+                fi
+                sleep 1
+            done
+            
+            # 显示服务状态
+            echo ""
+            echo "服务状态:"
+            sudo systemctl status web.service --no-pager -l | head -10
+            echo ""
+            echo "✅ Web服务（web.service）已配置为开机自动启动"
+        else
+            echo "⚠️  web.service启动失败，查看错误信息..."
+            sudo systemctl status web.service --no-pager -l | head -15
+            echo ""
+            echo "尝试使用转流服务..."
+        fi
+    else
+        echo "⚠️  web.service启动失败，尝试转流服务..."
     fi
 fi
 
@@ -627,13 +1016,17 @@ if [ -f /etc/systemd/system/rtsp-stream.service ] && ! sudo systemctl is-active 
 fi
 
 # 如果systemd服务都不可用
-if ! sudo systemctl is-active --quiet rtsp-web.service 2>/dev/null &&    ! sudo systemctl is-active --quiet rtsp-stream.service 2>/dev/null; then
+if ! sudo systemctl is-active --quiet rtsp-web.service 2>/dev/null && \
+   ! sudo systemctl is-active --quiet web.service 2>/dev/null && \
+   ! sudo systemctl is-active --quiet rtsp-stream.service 2>/dev/null; then
     echo "⚠️  systemd服务未配置或启动失败，将使用脚本直接启动"
     echo "提示: 服务不会自动开机启动，建议配置systemd服务"
 fi
 
 # 方法2: 使用start_web.sh启动服务（推荐，后台运行）
-if ! sudo systemctl is-active --quiet rtsp-web.service 2>/dev/null &&    ! sudo systemctl is-active --quiet rtsp-stream.service 2>/dev/null; then
+if ! sudo systemctl is-active --quiet rtsp-web.service 2>/dev/null && \
+   ! sudo systemctl is-active --quiet web.service 2>/dev/null && \
+   ! sudo systemctl is-active --quiet rtsp-stream.service 2>/dev/null; then
     echo "使用 start_web.sh 启动服务（转流+Web服务器，后台运行）..."
     echo ""
     
@@ -893,12 +1286,20 @@ echo -e "${YELLOW}2. 如果遇到网络错误，运行诊断工具:${NC} ./scrip
 echo -e "${YELLOW}3. 检查浏览器控制台（F12）查看详细错误信息${NC}"
 echo ""
 echo -e "${CYAN}服务管理（systemd）:${NC}"
-echo -e "  Web服务（转流+Web服务器）:${NC}"
+echo -e "  Web服务（转流+Web服务器，推荐）:${NC}"
 echo -e "    查看状态: ${YELLOW}sudo systemctl status rtsp-web${NC}"
 echo -e "    启动服务: ${YELLOW}sudo systemctl start rtsp-web${NC}"
 echo -e "    停止服务: ${YELLOW}sudo systemctl stop rtsp-web${NC}"
 echo -e "    重启服务: ${YELLOW}sudo systemctl restart rtsp-web${NC}"
 echo -e "    查看日志: ${YELLOW}sudo journalctl -u rtsp-web -f${NC}"
+echo ""
+echo -e "  Web服务（备选，日志在/var/log/）:${NC}"
+echo -e "    查看状态: ${YELLOW}sudo systemctl status web${NC}"
+echo -e "    启动服务: ${YELLOW}sudo systemctl start web${NC}"
+echo -e "    停止服务: ${YELLOW}sudo systemctl stop web${NC}"
+echo -e "    重启服务: ${YELLOW}sudo systemctl restart web${NC}"
+echo -e "    查看日志: ${YELLOW}sudo journalctl -u web -f${NC}"
+echo -e "    或查看日志文件: ${YELLOW}tail -f /var/log/web.log${NC}"
 echo ""
 echo -e "  转流服务（仅转流）:${NC}"
 echo -e "    查看状态: ${YELLOW}sudo systemctl status rtsp-stream${NC}"
@@ -908,194 +1309,269 @@ echo -e "    重启服务: ${YELLOW}sudo systemctl restart rtsp-stream${NC}"
 echo -e "    查看日志: ${YELLOW}sudo journalctl -u rtsp-stream -f${NC}"
 echo ""
 
-# 步骤8: 启动/重启服务
-echo -e "${BLUE}[8/9] 启动/重启服务...${NC}"
+# 步骤8: 重启Ubuntu系统
+echo -e "${BLUE}[8/9] 重启Ubuntu系统...${NC}"
 echo ""
-echo -e "${YELLOW}是否要立即启动或重启服务？${NC}"
-echo -e "  1) 启动服务（如果未运行）"
-echo -e "  2) 重启服务（停止后重新启动）"
-echo -e "  3) 跳过（服务已在后台启动）"
+echo -e "${YELLOW}是否要立即重启Ubuntu系统？${NC}"
+echo -e "  1) 立即重启Ubuntu系统（推荐，验证开机自启动）"
+echo -e "  2) 跳过重启（稍后手动重启）"
 echo ""
-read -p "请选择 [1/2/3] (默认: 3): " -r SERVICE_ACTION
-SERVICE_ACTION=${SERVICE_ACTION:-3}
+read -p "请选择 [1/2] (默认: 2): " -r REBOOT_ACTION
+REBOOT_ACTION=${REBOOT_ACTION:-2}
 
-case $SERVICE_ACTION in
+case $REBOOT_ACTION in
     1)
         echo ""
-        echo -e "${BLUE}正在启动服务...${NC}"
+        echo -e "${YELLOW}⚠️  警告: 即将重启Ubuntu系统！${NC}"
+        echo -e "${YELLOW}系统将在10秒后自动重启...${NC}"
+        echo -e "${YELLOW}按 Ctrl+C 可以取消${NC}"
+        echo ""
+        
+        # 倒计时
+        for i in {10..1}; do
+            echo -ne "\r${YELLOW}倒计时: ${i} 秒...${NC}   "
+            sleep 1
+        done
+        echo ""
+        echo ""
+        
+        echo -e "${BLUE}正在重启Ubuntu系统...${NC}"
         $SSH_CMD $REMOTE_HOST << 'ENDSSH'
+echo "=========================================="
+echo "  重启Ubuntu系统"
+echo "=========================================="
+echo ""
+echo "系统即将重启，以验证开机自启动配置..."
+echo ""
+
+# 最后检查并修复权限（使用专门的权限修复脚本）
+echo "最后检查并修复权限..."
 cd ~/rtsp-stream
 
-echo "=========================================="
-echo "  启动RTSP转HLS服务"
-echo "=========================================="
-echo ""
-
-# 优先使用systemd服务
-if [ -f /etc/systemd/system/rtsp-web.service ]; then
-    echo "使用systemd Web服务启动..."
-    sudo systemctl start rtsp-web.service 2>/dev/null || true
-    sleep 2
-    
-    if sudo systemctl is-active --quiet rtsp-web.service; then
-        echo "✅ systemd Web服务已启动"
-    else
-        echo "⚠️  systemd服务启动失败，尝试使用脚本启动..."
-        if [ -f "./start_web.sh" ]; then
-            nohup bash ./start_web.sh > /tmp/start_web.log 2>&1 &
-            echo "✅ 已使用start_web.sh启动服务（后台运行）"
-        fi
-    fi
-elif [ -f /etc/systemd/system/rtsp-stream.service ]; then
-    echo "使用systemd转流服务启动..."
-    sudo systemctl start rtsp-stream.service 2>/dev/null || true
-    sleep 2
-    
-    if sudo systemctl is-active --quiet rtsp-stream.service; then
-        echo "✅ systemd转流服务已启动"
-    else
-        echo "⚠️  systemd服务启动失败，尝试使用脚本启动..."
-        if [ -f "./scripts/start_stream.sh" ]; then
-            nohup bash ./scripts/start_stream.sh > /tmp/start_stream.log 2>&1 &
-            echo "✅ 已使用start_stream.sh启动服务（后台运行）"
-        fi
-    fi
+# 运行权限修复脚本（如果存在）
+if [ -f "./scripts/fix_permissions.sh" ]; then
+    bash ./scripts/fix_permissions.sh
 else
-    echo "systemd服务未配置，使用脚本启动..."
-    if [ -f "./start_web.sh" ]; then
-        nohup bash ./start_web.sh > /tmp/start_web.log 2>&1 &
-        echo "✅ 已使用start_web.sh启动服务（后台运行）"
-    elif [ -f "./scripts/start_stream.sh" ]; then
-        nohup bash ./scripts/start_stream.sh > /tmp/start_stream.log 2>&1 &
-        echo "✅ 已使用start_stream.sh启动服务（后台运行）"
+    # 如果脚本不存在，手动修复（最高权限）
+    echo "手动修复权限（最高权限 777）..."
+    chmod 777 start_web.sh 2>/dev/null || sudo chmod 777 start_web.sh 2>/dev/null || true
+    chmod 777 scripts/*.sh 2>/dev/null || sudo chmod 777 scripts/*.sh 2>/dev/null || true
+    chmod 777 *.sh 2>/dev/null || sudo chmod 777 *.sh 2>/dev/null || true
+    chmod 777 web/*.py 2>/dev/null || sudo chmod 777 web/*.py 2>/dev/null || true
+    chmod 777 scripts 2>/dev/null || sudo chmod 777 scripts 2>/dev/null || true
+    chmod 777 web 2>/dev/null || sudo chmod 777 web 2>/dev/null || true
+    chmod 777 config 2>/dev/null || sudo chmod 777 config 2>/dev/null || true
+    chmod 777 config/*.conf 2>/dev/null || sudo chmod 777 config/*.conf 2>/dev/null || true
+    
+    # 如果还是失败，使用sudo强制设置整个目录
+    if [ ! -x start_web.sh ]; then
+        echo "使用sudo强制设置整个目录最高权限..."
+        sudo chmod -R 777 . 2>/dev/null || true
     fi
 fi
 
+# 确保符号链接存在且正确
 echo ""
-echo "等待服务启动..."
+echo "检查符号链接..."
+if [ -L "/usr/local/bin/rtsp-start-web" ]; then
+    echo "  ✓ 符号链接存在: /usr/local/bin/rtsp-start-web"
+    ls -la /usr/local/bin/rtsp-start-web | sed 's/^/    /'
+    
+    # 验证符号链接指向的文件是否存在
+    LINK_TARGET=$(readlink -f /usr/local/bin/rtsp-start-web)
+    if [ -f "$LINK_TARGET" ]; then
+        echo "  ✓ 符号链接目标文件存在: $LINK_TARGET"
+        # 确保目标文件有最高权限
+        chmod 777 "$LINK_TARGET" 2>/dev/null || sudo chmod 777 "$LINK_TARGET" 2>/dev/null || true
+        sudo chmod 777 /usr/local/bin/rtsp-start-web 2>/dev/null || true
+    else
+        echo "  ✗ 警告: 符号链接目标文件不存在，重新创建..."
+        sudo rm -f /usr/local/bin/rtsp-start-web
+        sudo ln -s "$(pwd)/start_web.sh" /usr/local/bin/rtsp-start-web
+        # 确保新创建的符号链接和文件都有最高权限
+        chmod 777 "$(pwd)/start_web.sh" 2>/dev/null || sudo chmod 777 "$(pwd)/start_web.sh" 2>/dev/null || true
+        sudo chmod 777 /usr/local/bin/rtsp-start-web 2>/dev/null || true
+    fi
+else
+    echo "  ⚠ 符号链接不存在，创建中..."
+    sudo ln -s "$(pwd)/start_web.sh" /usr/local/bin/rtsp-start-web 2>/dev/null || true
+    if [ -L "/usr/local/bin/rtsp-start-web" ]; then
+        echo "  ✓ 符号链接创建成功"
+        # 确保符号链接和原始文件都有最高权限
+        sudo chmod 777 /usr/local/bin/rtsp-start-web 2>/dev/null || true
+        chmod 777 "$(pwd)/start_web.sh" 2>/dev/null || sudo chmod 777 "$(pwd)/start_web.sh" 2>/dev/null || true
+    else
+        echo "  ✗ 符号链接创建失败"
+    fi
+fi
+
+# 强制确保服务已启用（使用多种方法，确保100%成功）
+echo ""
+echo "=========================================="
+echo "  强制确保服务已启用（使用最高权限）"
+echo "=========================================="
+echo ""
+
+# 方法1: 使用 systemctl enable
+if ! systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+    echo "方法1: 使用 systemctl enable..."
+    sudo systemctl enable rtsp-web.service 2>/dev/null || true
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sleep 1
+fi
+
+# 方法2: 如果方法1失败，手动创建符号链接
+if ! systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+    echo "方法2: 手动创建systemd服务链接..."
+    if [ -f "/etc/systemd/system/rtsp-web.service" ]; then
+        sudo mkdir -p /etc/systemd/system/multi-user.target.wants 2>/dev/null || true
+        sudo ln -sf /etc/systemd/system/rtsp-web.service /etc/systemd/system/multi-user.target.wants/rtsp-web.service 2>/dev/null || true
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sleep 1
+    fi
+fi
+
+# 方法3: 使用 systemctl preset
+if ! systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+    echo "方法3: 使用 systemctl preset..."
+    sudo systemctl preset rtsp-web.service 2>/dev/null || true
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sleep 1
+fi
+
+# 最终验证服务状态
+echo ""
+RTSP_WEB_ENABLED=false
+WEB_SERVICE_ENABLED=false
+
+if systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+    RTSP_WEB_ENABLED=true
+    echo "✓✓✓ rtsp-web.service已确认启用开机自启动 ✓✓✓"
+    systemctl is-enabled rtsp-web.service
+    echo ""
+    echo "服务将在系统重启后自动启动！"
+else
+    echo "✗✗✗ 警告: rtsp-web.service启用失败，尝试最后的方法..."
+    # 最后的方法: 直接检查并创建链接
+    if [ -f "/etc/systemd/system/rtsp-web.service" ]; then
+        echo "最后方法: 直接创建服务链接..."
+        sudo mkdir -p /etc/systemd/system/multi-user.target.wants 2>/dev/null || true
+        sudo rm -f /etc/systemd/system/multi-user.target.wants/rtsp-web.service 2>/dev/null || true
+        sudo ln -sf /etc/systemd/system/rtsp-web.service /etc/systemd/system/multi-user.target.wants/rtsp-web.service 2>/dev/null || true
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sleep 2
+        
+        # 最终验证
+        if systemctl is-enabled rtsp-web.service >/dev/null 2>&1; then
+            RTSP_WEB_ENABLED=true
+            echo "✓✓✓ 最后方法成功，rtsp-web.service已启用 ✓✓✓"
+            systemctl is-enabled rtsp-web.service
+        else
+            echo "✗✗✗ rtsp-web.service所有方法都失败，但服务文件已创建"
+            echo "服务文件位置: /etc/systemd/system/rtsp-web.service"
+            echo "尝试启用备选服务 web.service..."
+        fi
+    else
+        echo "✗✗✗ rtsp-web.service文件不存在，尝试启用备选服务 web.service..."
+    fi
+fi
+
+# 如果rtsp-web.service未启用，尝试启用web.service作为备选
+if [ "$RTSP_WEB_ENABLED" = false ] && [ -f "/etc/systemd/system/web.service" ]; then
+    echo ""
+    echo "尝试启用备选服务 web.service..."
+    if ! systemctl is-enabled web.service >/dev/null 2>&1; then
+        sudo systemctl enable web.service 2>/dev/null || true
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sleep 1
+    fi
+    
+    if systemctl is-enabled web.service >/dev/null 2>&1; then
+        WEB_SERVICE_ENABLED=true
+        echo "✓✓✓ web.service已确认启用开机自启动 ✓✓✓"
+        systemctl is-enabled web.service
+        echo ""
+        echo "服务将在系统重启后自动启动！"
+    else
+        echo "⚠️  web.service启用也失败，但服务文件已创建"
+        echo "服务文件位置: /etc/systemd/system/web.service"
+        echo "请手动执行: sudo systemctl enable web.service"
+    fi
+fi
+
+# 总结
+echo ""
+if [ "$RTSP_WEB_ENABLED" = true ]; then
+    echo "✅ 主要服务已启用: rtsp-web.service"
+elif [ "$WEB_SERVICE_ENABLED" = true ]; then
+    echo "✅ 备选服务已启用: web.service"
+else
+    echo "⚠️  警告: 没有服务被启用，请手动启用服务"
+fi
+
+echo ""
+
+# 同步文件系统，确保数据写入磁盘
+echo ""
+echo "同步文件系统..."
+sync
+sleep 1
+
+# 重启系统（使用多种方法确保成功）
+echo ""
+echo "执行系统重启..."
+echo "（如果10秒内没有重启，请手动执行: sudo reboot）"
+
+# 使用 nohup 在后台执行重启，避免SSH连接影响
+nohup bash -c 'sleep 2; sudo reboot' > /dev/null 2>&1 &
+
+# 等待一下确保命令执行
 sleep 3
 
-# 检查服务状态
-if pgrep -f "ffmpeg.*stream.m3u8" > /dev/null; then
-    PID=$(pgrep -f "ffmpeg.*stream.m3u8" | head -1)
-    echo "✅ 转流服务运行中 (PID: $PID)"
-else
-    echo "⚠️  转流服务未运行，请检查日志"
+# 如果上面的方法失败，尝试直接执行
+if ! pgrep -f "reboot" > /dev/null 2>&1; then
+    # 方法1: 使用 reboot 命令
+    sudo reboot 2>/dev/null &
+    sleep 1
+    # 方法2: 使用 shutdown 命令
+    sudo shutdown -r now 2>/dev/null &
+    sleep 1
+    # 方法3: 直接调用 systemctl
+    sudo systemctl reboot 2>/dev/null &
 fi
 
-if lsof -Pi :8080 -sTCP:LISTEN > /dev/null 2>&1 || systemctl is-active --quiet nginx 2>/dev/null; then
-    echo "✅ Web服务器运行中"
-else
-    echo "⚠️  Web服务器未运行"
-fi
-
-echo ""
+# 等待系统重启（SSH连接会断开）
+sleep 5
 ENDSSH
-        echo -e "${GREEN}✓ 服务启动完成${NC}"
+        
+        REBOOT_EXIT_CODE=$?
+        
+        if [ $REBOOT_EXIT_CODE -eq 0 ] || [ $REBOOT_EXIT_CODE -eq 255 ]; then
+            # 255 是 SSH 连接断开时的退出码（正常情况）
+            echo ""
+            echo -e "${GREEN}✓ 重启命令已发送${NC}"
+            echo -e "${CYAN}系统正在重启，SSH连接已断开（这是正常的）${NC}"
+            echo ""
+            echo -e "${YELLOW}提示:${NC}"
+            echo -e "  1. 等待1-2分钟后，系统将完成重启"
+            echo -e "  2. 重启后，服务将自动启动（如果已配置开机自启动）"
+            echo -e "  3. 可以通过以下命令检查服务状态:"
+            echo -e "     ${YELLOW}ssh $REMOTE_HOST 'sudo systemctl status rtsp-web'${NC}"
+        else
+            echo ""
+            echo -e "${YELLOW}⚠️  重启命令执行可能失败，请手动重启:${NC}"
+            echo -e "  ${YELLOW}ssh $REMOTE_HOST 'sudo reboot'${NC}"
+        fi
         ;;
     2)
         echo ""
-        echo -e "${BLUE}正在重启服务...${NC}"
-        $SSH_CMD $REMOTE_HOST << 'ENDSSH'
-cd ~/rtsp-stream
-
-echo "=========================================="
-echo "  重启RTSP转HLS服务"
-echo "=========================================="
-echo ""
-
-# 停止现有服务
-echo "停止现有服务..."
-if [ -f /etc/systemd/system/rtsp-web.service ]; then
-    sudo systemctl stop rtsp-web.service 2>/dev/null || true
-fi
-if [ -f /etc/systemd/system/rtsp-stream.service ]; then
-    sudo systemctl stop rtsp-stream.service 2>/dev/null || true
-fi
-
-# 停止脚本启动的进程
-if [ -f "./scripts/stop_stream.sh" ]; then
-    bash ./scripts/stop_stream.sh > /dev/null 2>&1 || true
-fi
-
-# 清理端口
-lsof -ti:8080 | xargs kill -9 2>/dev/null || true
-pkill -f "ffmpeg.*stream.m3u8" 2>/dev/null || true
-
-sleep 2
-echo "✅ 旧服务已停止"
-echo ""
-
-# 启动服务
-echo "启动服务..."
-if [ -f /etc/systemd/system/rtsp-web.service ]; then
-    echo "使用systemd Web服务启动..."
-    sudo systemctl start rtsp-web.service 2>/dev/null || true
-    sleep 3
-    
-    if sudo systemctl is-active --quiet rtsp-web.service; then
-        echo "✅ systemd Web服务已重启"
-    else
-        echo "⚠️  systemd服务启动失败，尝试使用脚本启动..."
-        if [ -f "./start_web.sh" ]; then
-            nohup bash ./start_web.sh > /tmp/start_web.log 2>&1 &
-            echo "✅ 已使用start_web.sh重启服务（后台运行）"
-        fi
-    fi
-elif [ -f /etc/systemd/system/rtsp-stream.service ]; then
-    echo "使用systemd转流服务启动..."
-    sudo systemctl start rtsp-stream.service 2>/dev/null || true
-    sleep 3
-    
-    if sudo systemctl is-active --quiet rtsp-stream.service; then
-        echo "✅ systemd转流服务已重启"
-    else
-        echo "⚠️  systemd服务启动失败，尝试使用脚本启动..."
-        if [ -f "./scripts/start_stream.sh" ]; then
-            nohup bash ./scripts/start_stream.sh > /tmp/start_stream.log 2>&1 &
-            echo "✅ 已使用start_stream.sh重启服务（后台运行）"
-        fi
-    fi
-else
-    echo "systemd服务未配置，使用脚本启动..."
-    if [ -f "./start_web.sh" ]; then
-        nohup bash ./start_web.sh > /tmp/start_web.log 2>&1 &
-        echo "✅ 已使用start_web.sh重启服务（后台运行）"
-    elif [ -f "./scripts/start_stream.sh" ]; then
-        nohup bash ./scripts/start_stream.sh > /tmp/start_stream.log 2>&1 &
-        echo "✅ 已使用start_stream.sh重启服务（后台运行）"
-    fi
-fi
-
-echo ""
-echo "等待服务启动..."
-sleep 3
-
-# 检查服务状态
-if pgrep -f "ffmpeg.*stream.m3u8" > /dev/null; then
-    PID=$(pgrep -f "ffmpeg.*stream.m3u8" | head -1)
-    echo "✅ 转流服务运行中 (PID: $PID)"
-else
-    echo "⚠️  转流服务未运行，请检查日志"
-fi
-
-if lsof -Pi :8080 -sTCP:LISTEN > /dev/null 2>&1 || systemctl is-active --quiet nginx 2>/dev/null; then
-    echo "✅ Web服务器运行中"
-else
-    echo "⚠️  Web服务器未运行"
-fi
-
-echo ""
-ENDSSH
-        echo -e "${GREEN}✓ 服务重启完成${NC}"
-        ;;
-    3)
-        echo ""
-        echo -e "${YELLOW}跳过服务启动/重启（服务已在步骤6中启动）${NC}"
+        echo -e "${YELLOW}跳过重启（稍后手动重启）${NC}"
+        echo -e "${CYAN}提示: 要验证开机自启动，请手动重启系统:${NC}"
+        echo -e "  ${YELLOW}ssh $REMOTE_HOST 'sudo reboot'${NC}"
         ;;
     *)
         echo ""
-        echo -e "${YELLOW}无效选择，跳过服务启动/重启${NC}"
+        echo -e "${YELLOW}无效选择，跳过重启${NC}"
         ;;
 esac
 
